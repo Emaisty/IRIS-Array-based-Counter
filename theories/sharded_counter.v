@@ -2,6 +2,7 @@ From iris.algebra Require Import auth numbers.
 From iris.algebra.lib Require Import excl_auth.
 From iris.base_logic.lib Require Import invariants.
 From iris.heap_lang Require Import proofmode notation.
+From iris.heap_lang.lib Require Import par.
 From iris.prelude Require Import options.
 
 From summer_project Require Import counter_spec.
@@ -342,6 +343,62 @@ Section proof.
       iApply ("HΦ" $! (k + m)%nat). iFrame. iPureIntro. lia.
   Qed.
 
+  Lemma sc_sum_loop_two_handles_spec
+      γ a T i γi n j γj m start :
+    length γ.2 = T →
+    γ.2 !! i = Some γi →
+    γ.2 !! j = Some γj →
+    start ≤ i → i < j → j < T →
+    {{{ inv dcounterN (counter_inv γ a) ∗
+        own γi (◯E n) ∗ own γj (◯E m) }}}
+      sc_sum_loop a T #(start : nat)
+    {{{ (r : nat), RET #(r : nat);
+        own γi (◯E n) ∗ own γj (◯E m) ∗ ⌜n + m ≤ r⌝ }}}.
+  Proof.
+    intros Hlen Hγi Hγj Hstart Hij HjT.
+    remember (i - start) as fuel eqn:Hfuel.
+    revert start Hstart Hfuel.
+    induction fuel as [|fuel IH]; intros start Hstart Hfuel.
+    - have -> : start = i by lia.
+      iIntros (Φ) "(#Hinv & Hγif & Hγjf) HΦ".
+      rewrite /sc_sum_loop. wp_rec. wp_pures.
+      rewrite bool_decide_eq_false_2; last naive_solver lia. wp_if.
+
+      wp_bind (sc_sum_loop a T (#(i : nat) + #1))%E.
+      wp_binop. rewrite Z.add_1_r -Nat2Z.inj_succ.
+      wp_apply (sc_sum_loop_handle_spec γ a T j γj m (S i)
+        with "[$Hinv $Hγjf]"); [done|exact Hγj|lia|exact HjT|].
+      iIntros (r) "[Hγjf %Hmr]".
+
+      wp_bind (! _)%E. wp_pures.
+      wp_apply (sc_load_cell with "[$Hinv $Hγif]"); first exact Hγi.
+      iIntros "Hγif".
+      wp_pures. rewrite -Nat2Z.inj_add.
+
+      iApply ("HΦ" $! (n + r)%nat). iFrame. iPureIntro. lia.
+    - have Hstarti : start < i by lia.
+      iIntros (Φ) "(#Hinv & Hγif & Hγjf) HΦ".
+      rewrite /sc_sum_loop. wp_rec. wp_pures.
+      rewrite bool_decide_eq_false_2; last naive_solver lia. wp_if.
+
+      have Hstart' : S start ≤ i by lia.
+      have Hfuel' : fuel = i - S start by lia.
+      wp_bind (sc_sum_loop a T (#(start : nat) + #1))%E.
+      wp_binop. rewrite Z.add_1_r -Nat2Z.inj_succ.
+      wp_apply (IH (S start) Hstart' Hfuel'
+        with "[$Hinv $Hγif $Hγjf]").
+      iIntros (r) "(Hγif & Hγjf & %Hnmr)".
+
+      wp_bind (! _)%E. wp_pures.
+      wp_apply (sc_load_any_cell with "Hinv");
+        first by rewrite Hlen; lia.
+      iIntros (k) "_".
+      wp_pures. rewrite -Nat2Z.inj_add.
+
+      iApply ("HΦ" $! (k + r)%nat). iFrame. iPureIntro. lia.
+  Qed.
+
+
   Lemma sc_incr_spec γ c h n :
     {{{ sc_is_counter γ c ∗ sc_handle γ h n }}}
       sc_incr c h
@@ -385,6 +442,55 @@ Section proof.
     iExists i, γl. iFrame. iSplit; done.
   Qed.
 
+  Lemma sc_read_two_handles_spec γ c h1 h2 n m :
+    {{{ sc_is_counter γ c ∗
+        sc_handle γ h1 n ∗ sc_handle γ h2 m }}}
+      sc_read c
+    {{{ (k : nat), RET #k;
+        sc_handle γ h1 n ∗ sc_handle γ h2 m ∗ ⌜n + m ≤ k⌝ }}}.
+  Proof.
+    iIntros (Φ) "(Hcounter & Hhandle1 & Hhandle2) HΦ".
+    iDestruct "Hcounter" as (a ->) "#Hinv".
+    iDestruct "Hhandle1" as (i γi -> Hγi) "[Hγif Htotal1]".
+    iDestruct "Hhandle2" as (j γj -> Hγj) "[Hγjf Htotal2]".
+
+    have HiT : i < length γ.2 := lookup_lt_Some _ _ _ Hγi.
+    have HjT : j < length γ.2 := lookup_lt_Some _ _ _ Hγj.
+
+    rewrite /sc_read. wp_lam. wp_proj. wp_let. wp_proj. wp_let.
+    fold (sc_sum_loop a (length γ.2)).
+
+    destruct (Nat.lt_trichotomy i j) as [Hij|[Hij|Hij]].
+    - wp_smart_apply (sc_sum_loop_two_handles_spec
+        γ a (length γ.2) i γi n j γj m 0
+        with "[$Hinv $Hγif $Hγjf]");
+        [done|exact Hγi|exact Hγj|lia|exact Hij|exact HjT|].
+      iIntros (k) "(Hγif & Hγjf & %Hnmk)".
+      iApply "HΦ".
+      iSplitL "Hγif Htotal1".
+      { iExists i, γi. iFrame. iSplit; done. }
+      iSplitL "Hγjf Htotal2".
+      { iExists j, γj. iFrame. iSplit; done. }
+      done.
+    - subst j.
+      have -> : γj = γi by naive_solver.
+      iDestruct (own_valid_2 with "Hγif Hγjf")
+        as %Hinvalid%excl_auth_frag_op_valid.
+      done.
+    - wp_smart_apply (sc_sum_loop_two_handles_spec
+        γ a (length γ.2) j γj m i γi n 0
+        with "[$Hinv $Hγjf $Hγif]");
+        [done|exact Hγj|exact Hγi|lia|exact Hij|exact HiT|].
+      iIntros (k) "(Hγjf & Hγif & %Hmnk)".
+      iApply "HΦ".
+      iSplitL "Hγif Htotal1".
+      { iExists i, γi. iFrame. iSplit; done. }
+      iSplitL "Hγjf Htotal2".
+      { iExists j, γj. iFrame. iSplit; done. }
+      iPureIntro. lia.
+  Qed.
+
+
   Definition sharded_counter : counter Σ := {|
     new_counter := sc_new_counter;
     incr := sc_incr;
@@ -397,4 +503,62 @@ Section proof.
     incr_spec := sc_incr_spec;
     read_spec := sc_read_spec;
   |}.
+
+  Context `{!spawnG Σ}.
+
+
+  Definition sc_incr_twice : val :=
+    λ: "c" "h", sc_incr "c" "h";; sc_incr "c" "h".
+
+  Definition sc_two_incr_twice_read : val :=
+    λ: "c" "h1" "h2",
+      (sc_incr_twice "c" "h1" ||| sc_incr_twice "c" "h2");;
+      sc_read "c".
+
+  Lemma sc_two_incr_twice_read_lower_bound_spec `{!spawnG Σ} γ c h1 h2 n m :
+    {{{ sc_is_counter γ c ∗
+        sc_handle γ h1 n ∗
+        sc_handle γ h2 m }}}
+      sc_two_incr_twice_read c h1 h2
+    {{{ (k : nat), RET #k;
+        sc_handle γ h1 (S (S n)) ∗
+        sc_handle γ h2 (S (S m)) ∗
+        ⌜n + m + 4 ≤ k⌝ }}}.
+  Proof.
+    iIntros (Φ) "(#Hcounter & Hhandle1 & Hhandle2) HΦ".
+    rewrite /sc_two_incr_twice_read. wp_lam. wp_pures.
+
+    wp_bind (par
+      (λ: <>, sc_incr_twice c h1)%V
+      (λ: <>, sc_incr_twice c h2)%V).
+    iApply (par_spec
+      (λ _, sc_handle γ h1 (S (S n)))%I
+      (λ _, sc_handle γ h2 (S (S m)))%I
+      (λ: <>, sc_incr_twice c h1)%V
+      (λ: <>, sc_incr_twice c h2)%V
+      with "[Hhandle1] [Hhandle2]").
+    - wp_lam. rewrite /sc_incr_twice. wp_lam. wp_pures.
+
+      wp_apply (sc_incr_spec with "[$Hcounter $Hhandle1]").
+      iIntros "Hhandle1". wp_pures.
+
+      wp_apply (sc_incr_spec with "[$Hcounter $Hhandle1]").
+      iIntros "Hhandle1". iFrame.
+    - wp_lam. rewrite /sc_incr_twice. wp_lam. wp_pures.
+
+      wp_apply (sc_incr_spec with "[$Hcounter $Hhandle2]").
+      iIntros "Hhandle2". wp_pures.
+
+      wp_apply (sc_incr_spec with "[$Hcounter $Hhandle2]").
+      iIntros "Hhandle2". iFrame.
+    - iNext.
+      iIntros (v1 v2) "[Hhandle1 Hhandle2]".
+      iNext. wp_pures.
+
+      wp_apply (sc_read_two_handles_spec
+        with "[$Hcounter $Hhandle1 $Hhandle2]").
+      iIntros (k) "(Hhandle1 & Hhandle2 & %Hlower)".
+
+      iApply "HΦ". iFrame. iPureIntro. lia.
+  Qed.
 End proof.
